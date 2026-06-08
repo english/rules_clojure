@@ -18,9 +18,13 @@ maven.install(
         "org.clojure:data.json:2.4.0",
         "org.clojure:tools.deps:0.28.1578",
         "org.clojure:tools.namespace:1.1.0",
+        # used by the testrunner under `bazel coverage`
+        "cloverage:cloverage:1.2.4",
     ],
     repositories = [
         "https://repo1.maven.org/maven2",
+        # cloverage (coverage tooling) is published to Clojars
+        "https://repo.clojars.org",
     ],
     fail_if_repin_required = True,
     # repin by running `REPIN=1 bazel run @maven_deps//:pin`
@@ -48,6 +52,16 @@ maven.amend_artifact(
     exclusions = [
         "org.clojure:clojure",
         "org.clojure:spec.alpha",
+    ],
+)
+# Cloverage brings its own Clojure; exclude it so consumers (which already have
+# a Clojure on their classpath, possibly a different repo) don't get a second
+# copy. Cloverage runs against whatever Clojure is already present.
+maven.amend_artifact(
+    name = "maven_deps",
+    coordinates = "cloverage:cloverage",
+    exclusions = [
+        "org.clojure:clojure",
     ],
 )
 

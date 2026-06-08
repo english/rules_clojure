@@ -7,5 +7,11 @@ java_library(name="libcore_test",
 
 clojure_test(name="core_test",
              test_ns="example.core-test",
-             resource_strip_prefix="test",
-             runtime_deps=[":libcore_test"])
+             # Measure line coverage of example.core under `bazel coverage`.
+             # Cloverage instruments .clj *source*, so the source of the
+             # instrumented namespaces must be on the test runtime classpath.
+             # //src/example:src is a java_library shipping the raw .clj (the
+             # AOT jar //src/example:core contains only .class files). It is a
+             # runtime-only dep of the test, so it does not affect compilation.
+             instrument_ns=["example.core"],
+             runtime_deps=[":libcore_test", "//src/example:src"])

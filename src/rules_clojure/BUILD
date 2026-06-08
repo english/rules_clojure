@@ -118,7 +118,10 @@ java_import(name="libgen_build",
             data=[":bootstrap-gen-build"])
 
 java_import(name="testrunner",
-            jars=["libtestrunner.jar"])
+            jars=["libtestrunner.jar"],
+            # Cloverage is only loaded by the testrunner under `bazel coverage`
+            # (via requiring-resolve), but must be on the runtime classpath.
+            runtime_deps=["@maven_deps//:cloverage_cloverage"])
 
 java_binary(name="worker",
             main_class="rules_clojure.worker",

@@ -170,7 +170,18 @@ def clojure_jar_impl(ctx):
                                 "supports-multiplex-workers": "1",
                                 "requires-worker-protocol": "json"})
 
+    # Declare the .clj/.cljc sources as instrumented files so they appear in
+    # COVERAGE_MANIFEST under `bazel coverage`, and recurse into deps. Cloverage
+    # (driven by the testrunner) produces the actual line coverage.
+    instrumented_files_info = coverage_common.instrumented_files_info(
+        ctx,
+        source_attributes = ["srcs", "resources"],
+        dependency_attributes = ["deps", "runtime_deps", "compiledeps"],
+        extensions = ["clj", "cljc", "cljs"],
+    )
+
     return [
         default_info,
-        java_info
+        java_info,
+        instrumented_files_info,
     ]

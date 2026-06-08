@@ -90,6 +90,60 @@ clojure_test(
 
 Delegates to `java_test`, using `rules-clojure.testrunner` as the main class. `clojure_test` uses `clojure.test` to run all tests in a single namespace. Note that bazel defines a test as a script that returns exit code 0, so each `clojure_test` is a separate JVM, which makes startup time relevant.
 
+## Code coverage
+
+`clojure_test` supports `bazel coverage`. Clojure is compiled to bytecode at
+runtime, so JVM bytecode coverage (JaCoCo) maps poorly back to `.clj` source.
+Instead, `rules_clojure` measures coverage at the level of Clojure source forms
+with [Cloverage](https://github.com/cloverage/cloverage) and emits an LCOV
+report through Bazel's standard coverage pipeline.
+
+The testrunner detects coverage mode via the `COVERAGE_DIR` environment variable
+that Bazel sets under `bazel coverage`; ordinary `bazel test` runs are
+unaffected. Cloverage is loaded lazily and only needed under coverage.
+
+To enable coverage on a test:
+
+1. List the namespaces to measure in `instrument_ns`.
+2. Put the **source** `.clj` of those namespaces on the test's runtime
+   classpath. Cloverage instruments source forms, but a `clojure_library` jar
+   contains only AOT `.class` files. Ship the raw `.clj` from a `java_library`
+   (the AOT `.class` files still take load precedence for a normal `require`)
+   and add it to the test's `runtime_deps`.
+
+```python
+# the AOT library under test
+clojure_library(name = "core", srcs = ["core.clj"], aot = ["example.core"], ...)
+
+# the raw source, shipped as resources for Cloverage to instrument
+java_library(name = "src", resources = glob(["*.clj"]), resource_strip_prefix = "src")
+
+clojure_test(
+    name = "core_test",
+    test_ns = "example.core-test",
+    instrument_ns = ["example.core"],
+    runtime_deps = [":libcore_test", "//src/example:src"],
+)
+```
+
+By default Bazel only instruments the test target's own package. Widen
+`--instrumentation_filter` to include the source under test, and request a
+merged report (these can live in `.bazelrc`):
+
+```
+coverage --instrumentation_filter=//src,//test
+coverage --combined_report=lcov
+```
+
+Then:
+
+```
+bazel coverage //test/example:core_test
+# merged LCOV at bazel-out/_coverage/_coverage_report.dat
+```
+
+See `examples/simple` for a complete, working setup.
+
 ## tools.deps dependencies (optional)
 In your WORKSPACE:
 ```
