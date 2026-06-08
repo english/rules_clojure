@@ -90,6 +90,18 @@ clojure_test(
 
 Delegates to `java_test`, using `rules-clojure.testrunner` as the main class. `clojure_test` uses `clojure.test` to run all tests in a single namespace. Note that bazel defines a test as a script that returns exit code 0, so each `clojure_test` is a separate JVM, which makes startup time relevant.
 
+#### Test filtering
+
+`clojure_test` honours bazel's [`--test_filter`](https://bazel.build/reference/command-line-reference#flag--test_filter) flag. The filter is interpreted as a regular expression and matched (via `re-find`) against each test's fully-qualified name, `ns/test-name`; a plain string therefore acts as a substring match. Only the matching tests in the namespace are run.
+
+```
+# run only foo.bar-test/my-test
+bazel test //path/to:bar_test.test --test_filter=my-test
+
+# run every test whose name starts with "integration-"
+bazel test //path/to:bar_test.test --test_filter='/integration-'
+```
+
 ## tools.deps dependencies (optional)
 In your WORKSPACE:
 ```
