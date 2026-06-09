@@ -15,6 +15,8 @@ clojure_library = rule(
         "javacopts": attr.string_list(default = [], allow_empty = True, doc = "Optional javac compiler options"),
         "jvm_flags": attr.string_list(default=[], doc = "Optional jvm_flags to pass to the worker binary"),
         "_clojureworker_binary": attr.label(doc="Label for the ClojureWorker binary", default=Label("@rules_clojure//src/rules_clojure:worker"), executable = True, cfg="target"),
+        "_jacoco_instrumenter": attr.label(doc="Tool that offline-instruments the output jar under `bazel coverage`", default=Label("@rules_clojure//tools/coverage:jacoco_instrumenter"), executable = True, cfg="exec"),
+        "_jacoco_runtime": attr.label(doc="JaCoCo offline runtime, added to the compile classpath under coverage so instrumented dep classes can be loaded during AOT", default=Label("@bazel_tools//tools/jdk:JacocoCoverage"), providers=[[JavaInfo]]),
         "_libworker": attr.label_list(doc="extra jars to go in the worker env", default = [Label("@rules_clojure//src/rules_clojure:libworker")], providers=[[JavaInfo]]),
         "_libcompile": attr.label_list(doc="extra jars to go in the compile env", default = [Label("@rules_clojure//src/rules_clojure:libcompile")], providers=[[JavaInfo]])
     },

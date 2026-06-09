@@ -106,17 +106,6 @@ def clojure_jar_impl(ctx):
 
     compile_info = java_common.merge(compile_deps)
 
-    java_info = JavaInfo(
-        output_jar = output_jar,
-        compile_jar = output_jar,
-        source_jar = None,
-        deps = compile_deps,
-        runtime_deps = runtime_deps)
-
-    default_info = DefaultInfo(
-        files = depset([output_jar]),
-        runfiles = runfiles)
-
     aot_nses = list(ctx.attr.aot)
 
     input_files = ctx.files.srcs + ctx.files.resources
@@ -129,6 +118,13 @@ def clojure_jar_impl(ctx):
     compile_classpath = compile_info.transitive_runtime_jars.to_list() + ctx.files.compiledeps
     compile_classpath = [f.path for f in compile_classpath]
     compile_classpath = compile_classpath + [p for p in [src_dir] if p]
+
+    # Under coverage, deps' jars may contain jacoco-instrumented classes whose static
+    # initializers call into the jacoco offline runtime, so it must be loadable during AOT.
+    jacoco_runtime_jars = []
+    if ctx.configuration.coverage_enabled:
+        jacoco_runtime_jars = ctx.attr._jacoco_runtime[JavaInfo].transitive_runtime_jars.to_list()
+        compile_classpath = compile_classpath + [f.path for f in jacoco_runtime_jars]
 
     native_libs = []
     for f in runfiles.files.to_list():
@@ -152,14 +148,19 @@ def clojure_jar_impl(ctx):
         output = args_file,
         content = json.encode(compile_args))
 
-    inputs = ctx.files.srcs + ctx.files.resources + compile_info.transitive_runtime_jars.to_list() + native_libs + [args_file] + worker_classpath_depset.to_list()
+    inputs = ctx.files.srcs + ctx.files.resources + compile_info.transitive_runtime_jars.to_list() + native_libs + [args_file] + worker_classpath_depset.to_list() + jacoco_runtime_jars
 
     worker_classpath_str = ":".join([d.path for d in worker_classpath_depset.to_list()])
+
+    jvm_flags = list(ctx.attr.jvm_flags)
+    if ctx.configuration.coverage_enabled:
+        # don't let the jacoco offline runtime dump a jacoco.exec when the worker exits
+        jvm_flags.append("-Djacoco-agent.output=none")
 
     ctx.actions.run(
         executable= ctx.executable._clojureworker_binary,
         arguments=
-        ["--jvm_flags=" + f for f in ctx.attr.jvm_flags] +
+        ["--jvm_flags=" + f for f in jvm_flags] +
         ["-m", "rules-clojure.worker",
          "@%s" % args_file.path],
         outputs = [output_jar],
@@ -170,7 +171,49 @@ def clojure_jar_impl(ctx):
                                 "supports-multiplex-workers": "1",
                                 "requires-worker-protocol": "json"})
 
+    # Offline-instrument the jar for `bazel coverage`, the same shape JavaBuilder
+    # produces for java_library: instrumented .class entries, .class.uninstrumented
+    # originals, and a *-paths-for-coverage.txt mapping classes to source paths.
+    # JacocoCoverageRunner (which java_test swaps in as the main class under coverage)
+    # picks all of that up from the runtime classpath with no further wiring.
+    final_jar = output_jar
+    if ctx.coverage_instrumented() and len(aot_nses) > 0:
+        instr_jar = ctx.actions.declare_file("%s-instr.jar" % ctx.label.name)
+        coverage_srcs = [f for f in ctx.files.srcs + ctx.files.resources if f.extension in ["clj", "cljc"]]
+        instr_args = ctx.actions.args()
+        instr_args.set_param_file_format("multiline")
+        instr_args.use_param_file("@%s", use_always = True)
+        instr_args.add(output_jar)
+        instr_args.add(instr_jar)
+        instr_args.add_all(coverage_srcs)
+        ctx.actions.run(
+            executable = ctx.executable._jacoco_instrumenter,
+            arguments = [instr_args],
+            inputs = [output_jar],
+            outputs = [instr_jar],
+            mnemonic = "ClojureJacocoInstrument",
+            progress_message = "Instrumenting %s for coverage" % ctx.label)
+        final_jar = instr_jar
+
+    java_info = JavaInfo(
+        output_jar = final_jar,
+        compile_jar = output_jar,
+        source_jar = None,
+        deps = compile_deps,
+        runtime_deps = runtime_deps)
+
+    default_info = DefaultInfo(
+        files = depset([final_jar]),
+        runfiles = runfiles)
+
+    instrumented_files_info = coverage_common.instrumented_files_info(
+        ctx,
+        source_attributes = ["srcs", "resources"],
+        dependency_attributes = ["deps", "runtime_deps", "data", "compiledeps"],
+        extensions = ["clj", "cljc"])
+
     return [
         default_info,
-        java_info
+        java_info,
+        instrumented_files_info
     ]
