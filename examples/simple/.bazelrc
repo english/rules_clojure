@@ -3,7 +3,7 @@ build --tool_java_runtime_version=local_jdk
 
 # Code coverage (`bazel coverage`). rules_clojure measures Clojure line
 # coverage with Cloverage. By default Bazel only instruments the test's own
-# package, so widen the filter to the code under test, and emit a merged LCOV
+# package, so widen the filter to the source under test, and emit a merged LCOV
 # report.
-coverage --instrumentation_filter=//src,//test
+coverage --instrumentation_filter=//src
 coverage --combined_report=lcov

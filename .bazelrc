@@ -7,5 +7,5 @@ build --tool_java_runtime_version=local_jdk
 # Code coverage. clojure_test measures Clojure line coverage via Cloverage and
 # emits LCOV. Widen the instrumentation filter past the default (test package
 # only) to the source under test.
-coverage --instrumentation_filter=//src,//test
+coverage --instrumentation_filter=//src
 coverage --combined_report=lcov

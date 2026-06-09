@@ -92,46 +92,32 @@ Delegates to `java_test`, using `rules-clojure.testrunner` as the main class. `c
 
 ## Code coverage
 
-`clojure_test` supports `bazel coverage`. Clojure is compiled to bytecode at
-runtime, so JVM bytecode coverage (JaCoCo) maps poorly back to `.clj` source.
-Instead, `rules_clojure` measures coverage at the level of Clojure source forms
-with [Cloverage](https://github.com/cloverage/cloverage) and emits an LCOV
-report through Bazel's standard coverage pipeline.
+`clojure_test` supports `bazel coverage` with no extra configuration. Clojure is
+compiled to bytecode at runtime, so JVM bytecode coverage (JaCoCo) maps poorly
+back to `.clj` source. Instead, `rules_clojure` measures coverage at the level
+of Clojure source forms with [Cloverage](https://github.com/cloverage/cloverage)
+and emits an LCOV report through Bazel's standard coverage pipeline.
 
 The testrunner detects coverage mode via the `COVERAGE_DIR` environment variable
 that Bazel sets under `bazel coverage`; ordinary `bazel test` runs are
-unaffected. Cloverage is loaded lazily and only needed under coverage.
+unaffected, and Cloverage is loaded lazily so it is only needed under coverage.
+The namespaces to instrument are derived automatically from Bazel's coverage
+manifest — i.e. the source files selected by `--instrumentation_filter` and the
+targets' `InstrumentedFilesInfo`. You do not list namespaces anywhere.
 
-To enable coverage on a test:
-
-1. List the namespaces to measure in `instrument_ns`.
-2. Put the **source** `.clj` of those namespaces on the test's runtime
-   classpath. Cloverage instruments source forms, but a `clojure_library` jar
-   contains only AOT `.class` files. Ship the raw `.clj` from a `java_library`
-   (the AOT `.class` files still take load precedence for a normal `require`)
-   and add it to the test's `runtime_deps`.
-
-```python
-# the AOT library under test
-clojure_library(name = "core", srcs = ["core.clj"], aot = ["example.core"], ...)
-
-# the raw source, shipped as resources for Cloverage to instrument
-java_library(name = "src", resources = glob(["*.clj"]), resource_strip_prefix = "src")
-
-clojure_test(
-    name = "core_test",
-    test_ns = "example.core-test",
-    instrument_ns = ["example.core"],
-    runtime_deps = [":libcore_test", "//src/example:src"],
-)
-```
+This works automatically because `clojure_library` ships its `.clj` sources as
+resources (Cloverage instruments source forms; the AOT `.class` files still take
+load precedence for a normal `require`), and a `clojure_test` transitively
+depends on the libraries under test. `gen_build`-generated targets already have
+this shape, so generated BUILD files get coverage for free — nothing to edit by
+hand.
 
 By default Bazel only instruments the test target's own package. Widen
-`--instrumentation_filter` to include the source under test, and request a
-merged report (these can live in `.bazelrc`):
+`--instrumentation_filter` to your source roots and request a merged report
+(typically in `.bazelrc`):
 
 ```
-coverage --instrumentation_filter=//src,//test
+coverage --instrumentation_filter=//src
 coverage --combined_report=lcov
 ```
 

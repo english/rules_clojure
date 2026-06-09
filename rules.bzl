@@ -45,20 +45,21 @@ clojure_repl = rule(
     toolchains = ["@bazel_tools//tools/jdk:toolchain_type"],
     implementation = _clojure_repl_impl)
 
-def clojure_test(name, *, test_ns, instrument_ns = [], deps=[], runtime_deps=[], **kwargs):
+def clojure_test(name, *, test_ns, deps=[], runtime_deps=[], **kwargs):
     # ideally the library name and the bin name would be the same. They can't be.
     # clojure src files would like to depend on `foo_test`, so mangle the test binary, not the src jar name
 
-    # `instrument_ns` lists the namespaces whose source forms should be measured
-    # under `bazel coverage` (via Cloverage). It is ignored for `bazel test`.
-    # The namespaces are passed as trailing args to the testrunner; their
-    # source .clj must be on the runtime classpath (carried as resources by
-    # clojure_library / a java_library), which is the normal case.
+    # Under `bazel coverage` the testrunner measures Clojure line coverage with
+    # Cloverage. The namespaces to instrument are derived automatically from the
+    # coverage manifest (driven by --instrumentation_filter); no extra
+    # configuration is needed here. The .clj source of the code under test must
+    # be on the runtime classpath, which is already the case for clojure_library
+    # targets (they ship their sources as resources).
     native.java_test(name=name,
                      runtime_deps = deps + runtime_deps + ["@rules_clojure//src/rules_clojure:testrunner"],
                      use_testrunner = False,
                      main_class="rules_clojure.testrunner",
-                     args = [test_ns] + list(instrument_ns),
+                     args = [test_ns],
                      **kwargs)
 
 def cljs_impl(ctx):

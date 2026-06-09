@@ -109,7 +109,9 @@
        line))))
 
 (defn- read-manifest
-  "Read COVERAGE_MANIFEST (one workspace-relative path per line), if present."
+  "Read COVERAGE_MANIFEST (one workspace-relative path per line), if present.
+  Bazel populates it with exactly the source files selected for coverage by
+  --instrumentation_filter and the targets' InstrumentedFilesInfo."
   []
   (when-let [m (System/getenv "COVERAGE_MANIFEST")]
     (let [f (io/file m)]
@@ -117,14 +119,47 @@
         (->> (str/split-lines (slurp f))
              (remove str/blank?))))))
 
+(defn- resource-suffix
+  "Given a workspace-relative source path from COVERAGE_MANIFEST (e.g.
+  `src/example/core.clj`), return the classpath-relative resource path that
+  resolves via io/resource (e.g. `example/core.clj`), by stripping leading
+  directory segments until one resolves. nil if none resolve (no source on the
+  classpath)."
+  [path]
+  (let [segs (str/split path #"/")]
+    (some (fn [n]
+            (let [cand (str/join "/" (drop n segs))]
+              (when (and (seq cand) (io/resource cand)) cand)))
+          (range (count segs)))))
+
+(defn- resource->ns
+  "Read the namespace symbol from a .clj/.cljc classpath resource."
+  [resource]
+  (let [read-ns-decl (requiring-resolve 'clojure.tools.namespace.parse/read-ns-decl)]
+    (with-open [rdr (java.io.PushbackReader. (io/reader (io/resource resource)))]
+      (some-> (read-ns-decl rdr {:read-cond :allow :features #{:clj}}) second))))
+
+(defn manifest-namespaces
+  "Derive the namespaces to instrument from COVERAGE_MANIFEST: every .clj/.cljc
+  source Bazel selected whose namespace can be resolved on the runtime
+  classpath. This makes coverage automatic — the developer does not list
+  namespaces; `--instrumentation_filter` controls scope."
+  [manifest-paths]
+  (->> manifest-paths
+       (filter (fn [p] (or (str/ends-with? p ".clj") (str/ends-with? p ".cljc"))))
+       (keep (fn [p]
+               (when-let [res (resource-suffix p)]
+                 (try (resource->ns res) (catch Throwable _ nil)))))
+       (distinct)))
+
 (defn run-coverage
-  "Run `test-ns` under Cloverage instrumentation of `instrument-nses`, writing
-  an LCOV report into COVERAGE_DIR. Returns the test exit code."
-  [coverage-dir test-ns instrument-nses]
-  (when (empty? instrument-nses)
-    (println "WARNING: rules_clojure coverage: no namespaces to instrument."
-             "Pass `instrument_ns` to clojure_test to measure coverage."))
-  (let [parse-args (requiring-resolve 'cloverage.args/parse-args)
+  "Run `test-ns` under Cloverage, instrumenting the source namespaces Bazel
+  selected for coverage (derived from COVERAGE_MANIFEST), and write an LCOV
+  report into COVERAGE_DIR. Returns the test exit code."
+  [coverage-dir test-ns]
+  (let [manifest        (read-manifest)
+        instrument-nses (remove #(= % test-ns) (manifest-namespaces manifest))
+        parse-args (requiring-resolve 'cloverage.args/parse-args)
         run-main   (requiring-resolve 'cloverage.coverage/run-main)
         exit-var   (requiring-resolve 'cloverage.coverage/*exit-after-test*)
         sfp-var    (requiring-resolve 'cloverage.source/source-file-path)
@@ -134,6 +169,10 @@
                             "-o" out-dir
                             "-x" (str test-ns)]
                            (map str instrument-nses))]
+    (when (empty? instrument-nses)
+      (println "WARNING: rules_clojure coverage: no instrumentable source found."
+               "Check that the code under test is covered by --instrumentation_filter"
+               "and that its .clj source is on the test runtime classpath."))
     ;; Cloverage's lcov reporter recomputes the SF: path via the classloader and
     ;; throws on jar-resident resources (jar: URIs are opaque). Under Bazel all
     ;; sources are jar resources, so replace it with identity on the
@@ -142,22 +181,12 @@
     ;; Don't let Cloverage call System/exit; we own the process exit code.
     (alter-var-root exit-var (constantly false))
     (let [code (if (seq instrument-nses)
-                 (try
-                   (run-main (parse-args argv {}) {})
-                   (catch Throwable t
-                     (println "ERROR: rules_clojure coverage failed while instrumenting"
-                              (pr-str instrument-nses) ":" (.getMessage t))
-                     (println "Cloverage instruments .clj SOURCE, so the source of each"
-                              "instrumented namespace must be on the test runtime classpath"
-                              "(e.g. a java_library shipping the raw .clj as resources, added"
-                              "to the clojure_test runtime_deps). The AOT jar contains only"
-                              ".class files.")
-                     (throw t)))
+                 (run-main (parse-args argv {}) {})
                  ;; nothing to instrument: just run the tests
                  (run-tests test-ns))
           lcov-file (io/file out-dir "lcov.info")]
       (when (.exists lcov-file)
-        (let [fixed (relativize-sf (slurp lcov-file) (read-manifest))
+        (let [fixed (relativize-sf (slurp lcov-file) manifest)
               dest  (io/file coverage-dir (str (str/replace (str test-ns) #"[^A-Za-z0-9_.-]" "_") ".dat"))]
           (spit dest fixed)
           (println "Wrote coverage report to" (.getAbsolutePath dest))))
@@ -165,10 +194,9 @@
 
 (defn -main [& args]
   (assert (string? (first args)) (print-str "first argument must be a string, got" args))
-  (let [test-ns        (-> args first symbol)
-        instrument-nses (map symbol (rest args))
-        coverage-dir   (System/getenv "COVERAGE_DIR")
+  (let [test-ns      (-> args first symbol)
+        coverage-dir (System/getenv "COVERAGE_DIR")
         code (if (and coverage-dir (not (str/blank? coverage-dir)))
-               (run-coverage coverage-dir test-ns instrument-nses)
+               (run-coverage coverage-dir test-ns)
                (run-tests test-ns))]
     (System/exit (int code))))

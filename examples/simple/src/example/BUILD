@@ -8,8 +8,11 @@ java_library(name="src",
 
 clojure_library(name="core",
                 srcs=["core.clj"],
+                # Ship the .clj source as a resource (as gen_build does). The AOT
+                # .class files still take load precedence for `require`; shipping
+                # the source lets `bazel coverage` (Cloverage) instrument it.
+                resources=["core.clj"],
                 resource_strip_prefix="src",
-                # resources=[],
                 aot=["example.core"],
                 deps=["@deps//:org_clojure_clojure"])
 
