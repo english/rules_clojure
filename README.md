@@ -117,10 +117,10 @@ Since `clojure_tools_deps` only downloads jars and only includes them in targets
 
 ### Git dependencies
 
-[Git deps](https://clojure.org/guides/deps_and_cli#_using_git_libraries) are supported:
+[Git deps](https://clojure.org/guides/deps_and_cli#_using_git_libraries) are supported. Declare any library as a git dep in your deps.edn as usual, e.g.:
 
 ```clojure
-{:deps {io.github.clojure/tools.gitlibs {:git/tag "v2.6.206" :git/sha "d34ba6d489455b30828a7286538934891130de6d"}}}
+{:deps {io.github.weavejester/medley {:git/tag "1.8.0" :git/sha "30e3f85"}}}
 ```
 
 tools.deps clones git deps into the standard gitlibs cache (`~/.gitlibs`, or `$GITLIBS` if set), like maven deps use `~/.m2`. Because git deps resolve to source directories rather than jars, `clojure_tools_deps` packs each git lib into a deterministic jar inside the `@deps` repository (content-addressed by `:git/sha`); from there it behaves exactly like a maven dep, including the per-namespace AOT targets. Labels are derived from the lib name only, e.g. `@deps//:io_github_clojure_tools_gitlibs`, so bumping the sha doesn't change any labels.
