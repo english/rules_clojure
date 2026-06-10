@@ -106,6 +106,42 @@
     (fs/mv temp output-jar)
     (assert (fs/exists? output-jar) (print-str "jar not found:" output-jar))))
 
+(defn pack-dirs!
+  "Deterministically pack the contents of `dirs` into `output-jar`. Entries
+   are sorted within each dir and mtimes are fixed (see `put-next-entry!`), so
+   identical input trees produce byte-identical jars. Duplicate entry names
+   across dirs are skipped (first dir wins, matching JVM classpath shadowing).
+   Git metadata is excluded."
+  [^Path output-jar dirs]
+  (fs/ensure-directory (fs/dirname output-jar))
+  (let [temp (Files/createTempFile (fs/dirname output-jar) (fs/filename output-jar) "jar" (into-array FileAttribute []))
+        entries (->> dirs
+                     (mapcat (fn [^Path dir]
+                               (->> (fs/ls-r dir)
+                                    (filter (fn [p] (-> p fs/path->file fs/normal-file?)))
+                                    (map (fn [p] [(str (fs/path-relative-to dir p)) p]))
+                                    (sort-by first))))
+                     (remove (fn [[^String rel _]]
+                               (or (= ".git" rel)
+                                   (str/starts-with? rel ".git/")
+                                   (str/includes? rel "/.git/")))))]
+    (with-open [jar-os (-> temp fs/path->file FileOutputStream. BufferedOutputStream. JarOutputStream.)]
+      (put-next-entry! jar-os JarFile/MANIFEST_NAME)
+      (.write ^Manifest manifest jar-os)
+      (.closeEntry jar-os)
+      (reduce (fn [seen [^String name ^Path p]]
+                (if (contains? seen name)
+                  seen
+                  (do
+                    (put-next-entry! jar-os name)
+                    (io/copy (fs/path->file p) jar-os)
+                    (.closeEntry jar-os)
+                    (conj seen name))))
+              #{} entries))
+    (fs/mv temp output-jar)
+    (assert (fs/exists? output-jar) (print-str "jar not found:" output-jar))
+    output-jar))
+
 (defn create-jar-json [json]
   (let [{:keys [src-dir resources aot-nses classes-dir output-jar classpath] :as args} json
         _ (when (seq resources) (assert src-dir))

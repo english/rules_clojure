@@ -22,6 +22,8 @@
     rules-clojure.java.classpath,
     rules-clojure.namespace.file,
     rules-clojure.namespace.find,
+    rules-clojure.util,
+    rules-clojure.jar,
     rules-clojure.gen-build])
 
 (def classes-dir "gen-build-classes")

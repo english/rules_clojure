@@ -202,40 +202,6 @@
         ]
       }
     },
-    "@@rules_clojure~//:extensions.bzl%deps": {
-      "general": {
-        "bzlTransitiveDigest": "fVOaAJmm/w4r+x3qg49cw3GvhdNaZ4f8awymXnlF4VE=",
-        "usagesDigest": "MJAlc7VZHxFg9/FIhgw6EIzouzOHImb+N3wfqzQgsDs=",
-        "recordedFileInputs": {},
-        "recordedDirentsInputs": {},
-        "envVariables": {},
-        "generatedRepoSpecs": {
-          "deps": {
-            "bzlFile": "@@rules_clojure~//rules:tools_deps.bzl",
-            "ruleClassName": "clojure_tools_deps",
-            "attributes": {
-              "aliases": [
-                "dev",
-                "test"
-              ],
-              "deps_edn": "@@//:deps.edn",
-              "root_module_name": "example-simple"
-            }
-          }
-        },
-        "moduleExtensionMetadata": {
-          "useAllRepos": "REGULAR",
-          "reproducible": false
-        },
-        "recordedRepoMappingEntries": [
-          [
-            "rules_clojure~",
-            "rules_clojure",
-            "rules_clojure~"
-          ]
-        ]
-      }
-    },
     "@@rules_kotlin~//src/main/starlark/core/repositories:bzlmod_setup.bzl%rules_kotlin_extensions": {
       "general": {
         "bzlTransitiveDigest": "fus14IFJ/1LGWWGKPH/U18VnJCoMjfDt1ckahqCnM0A=",
