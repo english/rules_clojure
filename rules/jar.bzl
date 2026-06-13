@@ -1,3 +1,9 @@
+# Clojure source file extensions, used both to pick which sources get listed in the
+# jacoco paths-for-coverage file and to declare instrumented sources to bazel. These
+# two must agree, or sources land in the coverage manifest without a matching entry in
+# the jar's paths file (or vice versa) and are silently dropped from coverage.dat.
+CLOJURE_SOURCE_EXTENSIONS = ["clj", "cljc"]
+
 def contains(lst, item):
     for x in lst:
         if x == item:
@@ -121,10 +127,14 @@ def clojure_jar_impl(ctx):
 
     # Under coverage, deps' jars may contain jacoco-instrumented classes whose static
     # initializers call into the jacoco offline runtime, so it must be loadable during AOT.
+    # Use the java toolchain's own jacocorunner (the same jar java_test uses at test time)
+    # so the offline-runtime version always matches.
     jacoco_runtime_jars = []
     if ctx.configuration.coverage_enabled:
-        jacoco_runtime_jars = ctx.attr._jacoco_runtime[JavaInfo].transitive_runtime_jars.to_list()
-        compile_classpath = compile_classpath + [f.path for f in jacoco_runtime_jars]
+        jacocorunner = ctx.toolchains["@bazel_tools//tools/jdk:toolchain_type"].java.jacocorunner
+        if jacocorunner:
+            jacoco_runtime_jars = [jacocorunner.executable]
+            compile_classpath = compile_classpath + [f.path for f in jacoco_runtime_jars]
 
     native_libs = []
     for f in runfiles.files.to_list():
@@ -152,15 +162,10 @@ def clojure_jar_impl(ctx):
 
     worker_classpath_str = ":".join([d.path for d in worker_classpath_depset.to_list()])
 
-    jvm_flags = list(ctx.attr.jvm_flags)
-    if ctx.configuration.coverage_enabled:
-        # don't let the jacoco offline runtime dump a jacoco.exec when the worker exits
-        jvm_flags.append("-Djacoco-agent.output=none")
-
     ctx.actions.run(
         executable= ctx.executable._clojureworker_binary,
         arguments=
-        ["--jvm_flags=" + f for f in jvm_flags] +
+        ["--jvm_flags=" + f for f in ctx.attr.jvm_flags] +
         ["-m", "rules-clojure.worker",
          "@%s" % args_file.path],
         outputs = [output_jar],
@@ -179,7 +184,10 @@ def clojure_jar_impl(ctx):
     final_jar = output_jar
     if ctx.coverage_instrumented() and len(aot_nses) > 0:
         instr_jar = ctx.actions.declare_file("%s-instr.jar" % ctx.label.name)
-        coverage_srcs = [f for f in ctx.files.srcs + ctx.files.resources if f.extension in ["clj", "cljc"]]
+        # Only AOT-compiled sources (srcs) produce instrumented classes; resources are
+        # never AOT'd, so listing them here would only add unmatched lines to the paths
+        # file. This is also what keeps them out of the coverage manifest below.
+        coverage_srcs = [f for f in ctx.files.srcs if f.extension in CLOJURE_SOURCE_EXTENSIONS]
         instr_args = ctx.actions.args()
         instr_args.set_param_file_format("multiline")
         instr_args.use_param_file("@%s", use_always = True)
@@ -192,7 +200,9 @@ def clojure_jar_impl(ctx):
             inputs = [output_jar],
             outputs = [instr_jar],
             mnemonic = "ClojureJacocoInstrument",
-            progress_message = "Instrumenting %s for coverage" % ctx.label)
+            progress_message = "Instrumenting %s for coverage" % ctx.label,
+            execution_requirements = {"supports-workers": "1",
+                                      "requires-worker-protocol": "json"})
         final_jar = instr_jar
 
     java_info = JavaInfo(
@@ -206,11 +216,15 @@ def clojure_jar_impl(ctx):
         files = depset([final_jar]),
         runfiles = runfiles)
 
+    # Only srcs (AOT-compiled) can ever be instrumented and reported. Declaring
+    # resources here would put resource-only .clj files into the coverage manifest and
+    # baseline, where they would show as permanently 0% (Clojure compiles them in memory
+    # at runtime, so jacoco never sees them).
     instrumented_files_info = coverage_common.instrumented_files_info(
         ctx,
-        source_attributes = ["srcs", "resources"],
+        source_attributes = ["srcs"],
         dependency_attributes = ["deps", "runtime_deps", "data", "compiledeps"],
-        extensions = ["clj", "cljc"])
+        extensions = CLOJURE_SOURCE_EXTENSIONS)
 
     return [
         default_info,
