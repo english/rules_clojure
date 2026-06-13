@@ -115,6 +115,18 @@ Note that tools.deps is only used for downloading jars, and creating the BUILD.b
 
 Since `clojure_tools_deps` only downloads jars and only includes them in targets that depend on them, there is no harm in including all `:aliases` in your project.
 
+### Git dependencies
+
+[Git deps](https://clojure.org/guides/deps_and_cli#_using_git_libraries) are supported. Declare any library as a git dep in your deps.edn as usual, e.g.:
+
+```clojure
+{:deps {io.github.weavejester/medley {:git/tag "1.8.0" :git/sha "30e3f85"}}}
+```
+
+tools.deps clones git deps into the standard gitlibs cache (`~/.gitlibs`, or `$GITLIBS` if set), like maven deps use `~/.m2`. Because git deps resolve to source directories rather than jars, `clojure_tools_deps` packs each git lib into a deterministic jar inside the `@deps` repository (content-addressed by `:git/sha`); from there it behaves exactly like a maven dep, including the per-namespace AOT targets. Labels are derived from the lib name only, e.g. `@deps//:io_github_clojure_tools_gitlibs`, so bumping the sha doesn't change any labels.
+
+Requirements: `git` must be on `PATH` during dependency resolution, and the sha must be pinned (`:git/sha`, optionally with `:git/tag`) — tools.deps enforces this. Private repos use your ambient git credentials (ssh agent, credential helpers); use the `env` attribute of `clojure_tools_deps` to pass extra environment variables if needed. Directory-based `:local/root` deps remain unsupported.
+
 ## BUILD generation (optional)
 
 In a BUILD file,

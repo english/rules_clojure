@@ -1,11 +1,14 @@
 (ns rules-clojure.gen-build-test
   (:require [clojure.java.io :as io]
             [clojure.java.shell :as shell]
+            [clojure.set :as set]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [rules-clojure.fs :as fs]
             [rules-clojure.gen-build :as gb]
-            [rules-clojure.test-utils :as test-utils]))
+            [rules-clojure.jar :as jar]
+            [rules-clojure.test-utils :as test-utils])
+  (:import (java.util.jar JarFile)))
 
 (defn- make-temp-dir
   "Create a temp directory with a src/ subdirectory (matching basis :paths)."
@@ -444,3 +447,186 @@
           "should emit __clj_lib aggregating subdirs")
       (is (re-find #"\"//src/example/child:__clj_lib\"" content)
           "__clj_lib deps should reference the clj subdir"))))
+
+;; ---- git dependencies ----
+
+(def ^:private git-sha "d34ba6d489455b30828a7286538934891130de6d")
+
+(defn- write-tree!
+  "Write a map of relative-path -> content under dir."
+  [^java.nio.file.Path dir files]
+  (doseq [[rel content] files]
+    (let [f (io/file (fs/path->file dir) rel)]
+      (.mkdirs (.getParentFile f))
+      (spit f content))))
+
+(defn- jar-entry-names [jar-path]
+  (with-open [jf (JarFile. (fs/path->file jar-path))]
+    (->> jf .entries enumeration-seq (mapv #(.getName ^java.util.jar.JarEntry %)))))
+
+(defn- jar-entry-content [jar-path entry-name]
+  (with-open [jf (JarFile. (fs/path->file jar-path))]
+    (slurp (.getInputStream jf (.getEntry jf entry-name)))))
+
+(deftest pack-dirs-deterministic
+  (let [tmp (fs/new-temp-dir "pack-dirs-test")
+        src (fs/->path tmp "src")
+        resources (fs/->path tmp "resources")]
+    (try
+      (write-tree! tmp {"src/foo/bar.clj" "(ns foo.bar)"
+                        "src/foo/baz.clj" "(ns foo.baz)"
+                        "src/.git/config" "git metadata"
+                        "src/dup.txt" "from src"
+                        "resources/data.edn" "{:a 1}"
+                        "resources/dup.txt" "from resources"})
+      (let [jar-a (fs/->path tmp "a.jar")
+            jar-b (fs/->path tmp "b.jar")]
+        (jar/pack-dirs! jar-a [src resources])
+        (jar/pack-dirs! jar-b [src resources])
+        (testing "byte-identical output for identical input trees"
+          (is (= (fs/shasum jar-a) (fs/shasum jar-b))))
+        (testing "contains files from all dirs, excludes .git"
+          (let [entries (set (jar-entry-names jar-a))]
+            (is (contains? entries "foo/bar.clj"))
+            (is (contains? entries "foo/baz.clj"))
+            (is (contains? entries "data.edn"))
+            (is (not-any? #(str/includes? % ".git") entries))))
+        (testing "duplicate entries: first dir wins, like JVM classpath shadowing"
+          (is (= 1 (count (filter #(= "dup.txt" %) (jar-entry-names jar-a)))))
+          (is (= "from src" (jar-entry-content jar-a "dup.txt")))))
+      (finally
+        (fs/rm-rf tmp)))))
+
+(deftest pack-dirs-survives-symlink-cycle
+  (testing "a git checkout with a directory-symlink cycle terminates instead of recursing forever"
+    (let [tmp (fs/new-temp-dir "pack-dirs-symlink-test")
+          src (fs/->path tmp "src")]
+      (try
+        (write-tree! tmp {"src/foo/bar.clj" "(ns foo.bar)"})
+        ;; loop -> .. : a directory symlink pointing back at an ancestor
+        (java.nio.file.Files/createSymbolicLink
+         (fs/->path src "foo" "loop")
+         (fs/->path src "foo")
+         (into-array java.nio.file.attribute.FileAttribute []))
+        (let [jar (fs/->path tmp "out.jar")]
+          (jar/pack-dirs! jar [src])
+          (let [entries (set (jar-entry-names jar))]
+            (is (contains? entries "foo/bar.clj"))
+            ;; the symlinked dir is not descended, so no recursive loop/ entries
+            (is (not-any? #(str/includes? % "loop/") entries))))
+        (finally
+          (fs/rm-rf tmp))))))
+
+(defn- git-dep-basis
+  "Fabricate a resolved basis for a single git dep with classpath dirs."
+  [lib sha dirs]
+  {:classpath (into {} (map (fn [d] [d {:lib-name lib}]) dirs))
+   :classpath-roots (vec dirs)
+   :libs {lib {:git/url "https://github.com/example/lib.git"
+               :git/sha sha
+               :paths (mapv str dirs)}}})
+
+(deftest materialize-git-deps-rewrites-basis
+  (let [tmp (fs/new-temp-dir "materialize-test")
+        checkout (fs/->path tmp "gitlibs" "libs" "io.github.foo" "bar" git-sha)
+        src (fs/->path checkout "src")
+        resources (fs/->path checkout "resources")
+        build-dir (fs/->path tmp "deps-build")
+        lib 'io.github.foo/bar]
+    (try
+      (write-tree! tmp {(str "gitlibs/libs/io.github.foo/bar/" git-sha "/src/foo/bar.clj") "(ns foo.bar)"
+                        (str "gitlibs/libs/io.github.foo/bar/" git-sha "/resources/data.edn") "{}"})
+      (fs/ensure-directory build-dir)
+      (let [basis (git-dep-basis lib git-sha [src resources])
+            basis' (gb/materialize-git-deps basis build-dir)
+            expected-jar (fs/->path build-dir "gitjars" (str "io_github_foo_bar-" git-sha ".jar"))]
+        (testing "classpath dirs are replaced by a single jar per lib"
+          (is (fs/exists? expected-jar))
+          (is (= {expected-jar {:lib-name lib}} (:classpath basis')))
+          (is (= [expected-jar] (:classpath-roots basis'))))
+        (testing "the jar contains the union of the lib's paths"
+          (is (= #{"META-INF/MANIFEST.MF" "foo/bar.clj" "data.edn"}
+                 (set (jar-entry-names expected-jar)))))
+        (testing "existing jars are reused (content-addressed by sha)"
+          (let [mtime (.lastModified (fs/path->file expected-jar))
+                basis'' (gb/materialize-git-deps basis build-dir)]
+            (is (= (:classpath basis') (:classpath basis'')))
+            (is (= mtime (.lastModified (fs/path->file expected-jar))))))
+        (testing "maven jars pass through untouched"
+          (let [jar-path (fs/->path tmp "some.jar")
+                mvn-basis {:classpath {jar-path {:lib-name 'org.clojure/clojure}}
+                           :classpath-roots [jar-path]
+                           :libs {'org.clojure/clojure {:mvn/version "1.12.1"}}}]
+            (is (= mvn-basis (gb/materialize-git-deps mvn-basis build-dir))))))
+      (finally
+        (fs/rm-rf tmp)))))
+
+(deftest materialize-git-deps-rejects-non-git-dirs
+  (let [tmp (fs/new-temp-dir "materialize-local-test")
+        local-dir (fs/->path tmp "local-lib" "src")
+        build-dir (fs/->path tmp "deps-build")
+        lib 'my/local-lib]
+    (try
+      (write-tree! tmp {"local-lib/src/local/core.clj" "(ns local.core)"})
+      (fs/ensure-directory build-dir)
+      (let [basis {:classpath {local-dir {:lib-name lib}}
+                   :classpath-roots [local-dir]
+                   :libs {lib {:local/root (str (fs/->path tmp "local-lib"))}}}]
+        (is (thrown-with-msg? Exception #"unsupported dependency type"
+                              (gb/materialize-git-deps basis build-dir))))
+      (finally
+        (fs/rm-rf tmp)))))
+
+(deftest gen-deps-build-emits-git-dep-targets
+  (let [tmp (fs/new-temp-dir "gen-deps-git-test")
+        checkout (fs/->path tmp "gitlibs" "libs" "io.github.foo" "bar" git-sha)
+        src (fs/->path checkout "src")
+        build-dir (fs/->path tmp "deps-build")
+        lib 'io.github.foo/bar]
+    (try
+      (write-tree! tmp {(str "gitlibs/libs/io.github.foo/bar/" git-sha "/src/foo/bar.clj") "(ns foo.bar)"})
+      (fs/ensure-directory build-dir)
+      (let [basis (-> (git-dep-basis lib git-sha [src])
+                      (gb/materialize-git-deps build-dir))
+            jar->lib (gb/->jar->lib basis)
+            dep-ns->label (gb/->dep-ns->label {:basis basis :deps-bazel {}})]
+        (gb/gen-deps-build {:repository-dir (fs/->path tmp "repository")
+                            :deps-build-dir build-dir
+                            :dep-ns->label dep-ns->label
+                            :jar->lib jar->lib
+                            :lib->jar (set/map-invert jar->lib)
+                            :lib->deps {}
+                            :deps-bazel {}})
+        (let [content (slurp (fs/path->file (fs/->path build-dir "BUILD.bazel")))]
+          (testing "emits a java_import over the materialized jar"
+            (is (re-find #"name = \"io_github_foo_bar\"" content))
+            (is (re-find (re-pattern (str "jars = \\[\"gitjars/io_github_foo_bar-" git-sha ".jar\"\\]")) content)))
+          (testing "emits per-namespace AOT targets like maven deps get"
+            (is (re-find #"name = \"ns_io_github_foo_bar_foo_bar\"" content))
+            (is (re-find #"aot = \[\"foo.bar\"\]" content)))))
+      (finally
+        (fs/rm-rf tmp)))))
+
+(deftest class->jar-handles-directory-classpath-entries
+  (testing "->class->jar must not crash on git-dep directory entries (gen_srcs-time basis)"
+    (let [tmp (fs/new-temp-dir "class-jar-dir-test")
+          dir (fs/->path tmp "src")]
+      (try
+        (write-tree! tmp {"src/com/example/Foo.class" "fake class bytes"
+                          "src/foo/bar.clj" "(ns foo.bar)"})
+        (let [basis {:classpath {dir {:lib-name 'io.github.foo/bar}}
+                     :classpath-roots [dir]}]
+          (is (= {'com.example.Foo dir} (gb/->class->jar basis))))
+        (finally
+          (fs/rm-rf tmp))))))
+
+(deftest path->absolute-handles-dirs
+  (let [deps-edn (fs/->path "/workspace/deps.edn")]
+    (testing "absolute paths pass through, regardless of extension"
+      (is (= (fs/->path "/home/u/.gitlibs/libs/foo/bar/abc/src")
+             (gb/path->absolute "/home/u/.gitlibs/libs/foo/bar/abc/src" deps-edn)))
+      (is (= (fs/->path "/home/u/.m2/repository/foo/foo.jar")
+             (gb/path->absolute "/home/u/.m2/repository/foo/foo.jar" deps-edn))))
+    (testing "relative paths resolve against the deps.edn dir"
+      (is (= (fs/->path "/workspace/src")
+             (gb/path->absolute "src" deps-edn))))))

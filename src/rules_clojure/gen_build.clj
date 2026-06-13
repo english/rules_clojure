@@ -9,6 +9,7 @@
             [clojure.tools.deps :as deps]
             [clojure.tools.deps.util.concurrent :as concurrent]
             [rules-clojure.fs :as fs]
+            [rules-clojure.jar :as jar]
             [rules-clojure.namespace.file :as file]
             [rules-clojure.namespace.find :as find]
             [rules-clojure.namespace.parse :as parse])
@@ -375,26 +376,17 @@
        (map (fn [sub-path]
               (str (fs/path-relative-to path sub-path))))))
 
-(defn classpath-files
-  "Given a single classpath item (a jar or a directory), return the set of files contained"
-  [path]
-  (cond
-    (-> path fs/path->file (.isDirectory)) (dir-files path)
-    (re-find #".jar$" (str path)) (jar-files path)))
-
-(defn jar-classes
-  "given the path to a jar, return a list of classes contained"
-  [path]
-  (->>
-   (jar-files path)
-   (map (fn [e]
-          (when-let [[_ class-name] (re-find #"(.+).class$" e)]
-            class-name)))
-   (filter identity)
-   (map (fn [e]
-          (-> e
-              (str/replace "/" ".")
-              symbol)))))
+(def classpath-files
+  "Given a single classpath item (a jar or a directory), return the files it
+  contains. Memoized (and eagerly realized) for the lifetime of the gen-build
+  process: `is-aoted?` is called once per namespace, and without the cache each
+  call would re-walk the entry's whole directory tree (git/source deps) or
+  re-open its jar (maven deps) — O(namespaces × tree-size) wasted I/O."
+  (memoize
+   (fn [path]
+     (cond
+       (-> path fs/path->file (.isDirectory)) (vec (dir-files path))
+       (re-find #"\.jar$" (str path)) (vec (jar-files path))))))
 
 (defn is-aoted?
   [path ns]
@@ -463,10 +455,20 @@
        (filter identity)
        (apply merge)))
 
+(defn classpath-classes
+  "given a classpath entry (a jar or a directory), return a list of classes contained"
+  [path]
+  (->> (classpath-files path)
+       (keep (fn [e]
+               (when-let [[_ class-name] (re-find #"(.+)\.class$" e)]
+                 (-> class-name
+                     (str/replace "/" ".")
+                     symbol))))))
+
 (s/def ::class->jar (s/map-of symbol? fs/path?))
 (s/fdef ->class->jar :args (s/cat :b ::basis) :ret ::class->jar)
 (defn ->class->jar
-  "returns a map of class symbol to jarpath for all jars on the classpath"
+  "returns a map of class symbol to classpath entry (jar or dir) for all libs on the classpath"
   [basis]
   {:post [(s/valid? ::class->jar %)]}
   (into {}
@@ -474,10 +476,48 @@
          (fn [path]
            (let [{:keys [lib-name]} (get-in basis [:classpath path])]
              (when lib-name
-               (->> (jar-classes path)
+               (->> (classpath-classes path)
                     (map (fn [c]
                            [c (fs/->path path)]))))))
          (:classpath-roots basis))))
+
+(defn materialize-git-deps
+  "tools.deps git dependencies resolve to source directories under the gitlibs
+  cache (~/.gitlibs), which the downstream jar-oriented pipeline can't consume.
+  Pack each git lib's directories into a single deterministic jar under
+  <deps-build-dir>/gitjars/ and rewrite the basis classpath to point at the
+  jar, so that downstream a git dep is indistinguishable from a maven dep.
+  Jar filenames embed :git/sha (content-addressed and immutable), so existing
+  jars are reused."
+  [basis deps-build-dir]
+  (let [classpath (:classpath basis)
+        ;; derive dir ordering from :classpath-roots so duplicate resources
+        ;; across a lib's :paths shadow the same way they would on a classpath
+        lib->dirs (->> (:classpath-roots basis)
+                       (filter (fn [path]
+                                 (and (get-in classpath [path :lib-name])
+                                      (-> path fs/path->file fs/directory?))))
+                       (group-by (fn [path] (get-in classpath [path :lib-name]))))]
+    (reduce
+     (fn [basis [lib dirs]]
+       (let [coord (get-in basis [:libs lib])
+             sha (:git/sha coord)
+             _ (throw-if-not! sha
+                              (str "unsupported dependency type for " lib ": only :mvn and git (:git/url + :git/sha) deps are supported")
+                              {:lib lib :paths (mapv str dirs) :coord coord})
+             jar-path (fs/->path deps-build-dir "gitjars" (str (library->label lib) "-" sha ".jar"))]
+         (when-not (fs/exists? jar-path)
+           (jar/pack-dirs! jar-path dirs))
+         (-> basis
+             (update :classpath (fn [cp]
+                                  (-> (apply dissoc cp dirs)
+                                      (assoc jar-path {:lib-name lib}))))
+             (update :classpath-roots (fn [roots]
+                                        (let [dirs-set (set dirs)]
+                                          (-> (remove dirs-set roots)
+                                              vec
+                                              (conj jar-path))))))))
+     basis lib->dirs)))
 
 (defn expand-deps- [basis]
   (let [ex-svc (concurrent/new-executor 2)]
@@ -884,9 +924,10 @@
 
 (defn path->absolute
   [path deps-edn-path]
-  (if (= "jar" (-> path fs/->path fs/extension))
-    (fs/->path path)
-    (fs/->path (fs/dirname deps-edn-path) path)))
+  (let [p (fs/->path path)]
+    (if (fs/absolute? p)
+      p
+      (fs/->path (fs/dirname deps-edn-path) path))))
 
 (defn basis-absolute-source-paths
   "By default the source directories on the basis `:classpath` are relative to the deps.edn. Absolute-ize them"
@@ -957,7 +998,9 @@
                                                external-label (jar->label (select-keys args [:jar->lib]) jarpath)
                                                extra-args (-> deps-bazel
                                                               (get-in [:deps external-label]))
-                                               _ (assert (re-find #".jar$" (str jarpath)) "only know how to handle jars for now")
+                                               _ (throw-if-not! (re-find #"\.jar$" (str jarpath))
+                                                                (str "unsupported non-jar classpath entry for " lib "; expected git deps to be materialized into jars")
+                                                                {:lib lib :path (str jarpath)})
                                                jarfile (JarFile. (fs/path->file jarpath))]
                                            (vec
                                             (concat
@@ -1042,10 +1085,11 @@
         deps-build-dir (-> deps-build-dir fs/->path fs/absolute)
         read-deps (#'read-deps deps-edn-path)
         deps-bazel (parse-deps-bazel read-deps (or root-module-name ""))
-        basis (make-basis {:read-deps read-deps
-                           :aliases (or (mapv keyword aliases) [])
-                           :repository-dir repository-dir
-                           :deps-edn-path deps-edn-path})
+        basis (-> (make-basis {:read-deps read-deps
+                               :aliases (or (mapv keyword aliases) [])
+                               :repository-dir repository-dir
+                               :deps-edn-path deps-edn-path})
+                  (materialize-git-deps deps-build-dir))
         jar->lib (->jar->lib basis)
         lib->jar (set/map-invert jar->lib)
         lib->deps (->lib->deps basis)

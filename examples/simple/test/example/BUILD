@@ -9,3 +9,13 @@ clojure_test(name="core_test",
              test_ns="example.core-test",
              resource_strip_prefix="test",
              runtime_deps=[":libcore_test"])
+
+java_library(name="libgitdep_test",
+                resources=["gitdep_test.clj"],
+                resource_strip_prefix="test",
+                runtime_deps=["//src/example:gitdep"])
+
+clojure_test(name="gitdep_test",
+             test_ns="example.gitdep-test",
+             resource_strip_prefix="test",
+             runtime_deps=[":libgitdep_test"])
