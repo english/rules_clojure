@@ -176,6 +176,12 @@
 
 (defn -main [& args]
   (set-uncaught-exception-handler!)
+  ;; Under `bazel coverage`, a dep jar on the AOT classpath may contain
+  ;; jacoco-instrumented classes whose offline runtime would otherwise dump a
+  ;; jacoco.exec when the worker exits. Set this unconditionally (it is a no-op
+  ;; when jacoco isn't on the classpath) so the worker key is the same with and
+  ;; without coverage and a single worker fleet serves both.
+  (System/setProperty "jacoco-agent.output" "none")
   (-> (Runtime/getRuntime) (.addShutdownHook (Thread. ^Runnable (fn []
                                                                   (doseq [d @temp-dirs]
                                                                     (fs/rm-rf d))))))

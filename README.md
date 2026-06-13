@@ -90,6 +90,31 @@ clojure_test(
 
 Delegates to `java_test`, using `rules-clojure.testrunner` as the main class. `clojure_test` uses `clojure.test` to run all tests in a single namespace. Note that bazel defines a test as a script that returns exit code 0, so each `clojure_test` is a separate JVM, which makes startup time relevant.
 
+### Coverage
+
+`bazel coverage` is supported via Bazel's standard JaCoCo pipeline:
+
+```
+bazel coverage --combined_report=lcov --instrumentation_filter=//src //test/...
+```
+
+Per-test LCOV reports are written to `bazel-testlogs/<target>/coverage.dat`, and the
+combined report to `bazel-out/_coverage/_coverage_report.dat` (render with `genhtml`).
+Line data references the original `.clj` sources.
+
+How it works: under coverage, each `clojure_library` matching `--instrumentation_filter`
+gets its output jar offline-instrumented with JaCoCo (the same scheme `java_library`
+uses, using the jacoco runner from the registered Java toolchain), and `java_test`
+collects execution data at runtime and converts it to LCOV.
+
+Notes:
+- Only AOT-compiled namespaces (`srcs`) are reported. Namespaces shipped as source-only
+  resources are compiled in memory at runtime and can't be instrumented.
+- A `defn` line is "covered" as soon as the namespace loads (the `def` executes at
+  load time); the function body lines are only covered when the function is called.
+- Branch data (`BRDA`) reflects JVM bytecode branches, which don't map 1:1 to Clojure
+  source; line coverage is the trustworthy signal.
+
 ## tools.deps dependencies (optional)
 In your WORKSPACE:
 ```
