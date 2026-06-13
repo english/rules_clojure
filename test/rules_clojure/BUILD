@@ -78,3 +78,7 @@ clojure_test(name="compile-test",
              test_ns = "rules-clojure.compile-test",
              data=["//src/rules_clojure:bootstrap"],
              env={"TEST_JARS": "$(rlocationpaths //src/rules_clojure:bootstrap)"})
+
+clojure_test(name="testrunner-test",
+             deps=[":test-deps"],
+             test_ns = "rules-clojure.testrunner-test")
