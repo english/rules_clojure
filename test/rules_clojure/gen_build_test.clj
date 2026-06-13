@@ -497,6 +497,26 @@
       (finally
         (fs/rm-rf tmp)))))
 
+(deftest pack-dirs-survives-symlink-cycle
+  (testing "a git checkout with a directory-symlink cycle terminates instead of recursing forever"
+    (let [tmp (fs/new-temp-dir "pack-dirs-symlink-test")
+          src (fs/->path tmp "src")]
+      (try
+        (write-tree! tmp {"src/foo/bar.clj" "(ns foo.bar)"})
+        ;; loop -> .. : a directory symlink pointing back at an ancestor
+        (java.nio.file.Files/createSymbolicLink
+         (fs/->path src "foo" "loop")
+         (fs/->path src "foo")
+         (into-array java.nio.file.attribute.FileAttribute []))
+        (let [jar (fs/->path tmp "out.jar")]
+          (jar/pack-dirs! jar [src])
+          (let [entries (set (jar-entry-names jar))]
+            (is (contains? entries "foo/bar.clj"))
+            ;; the symlinked dir is not descended, so no recursive loop/ entries
+            (is (not-any? #(str/includes? % "loop/") entries))))
+        (finally
+          (fs/rm-rf tmp))))))
+
 (defn- git-dep-basis
   "Fabricate a resolved basis for a single git dep with classpath dirs."
   [lib sha dirs]

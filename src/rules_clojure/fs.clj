@@ -100,11 +100,20 @@
        (map (fn [^File f]
               (.toPath f))))))
 
-(defn ls-r [dir]
+(defn symlink? [^Path path]
+  (Files/isSymbolicLink path))
+
+(defn ls-r
+  "Recursively list every path under `dir`. Does not descend into symbolic
+  links to directories: a symlinked directory is returned as a leaf entry
+  rather than traversed, which keeps the walk terminating on checkouts that
+  contain symlink cycles (e.g. a link pointing back at an ancestor)."
+  [dir]
   (->> dir
        ls
        (mapcat (fn [^Path path]
-                 (if (-> path .toFile directory?)
+                 (if (and (-> path .toFile directory?)
+                          (not (symlink? path)))
                    (concat [path] (ls-r path))
                    [path])))))
 
@@ -124,7 +133,10 @@
   (while (seq (ls dir))
     (doseq [^Path p (ls dir)
             :let [f (path->file p)]]
-      (if (directory? f)
+      ;; A symlinked directory is removed as a single entry: never recurse
+      ;; through it (that would delete the link target's contents, and loop
+      ;; forever on a symlink cycle).
+      (if (and (directory? f) (not (symlink? p)))
         (do
           (rm-rf p)
           (.delete f))

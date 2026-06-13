@@ -376,12 +376,17 @@
        (map (fn [sub-path]
               (str (fs/path-relative-to path sub-path))))))
 
-(defn classpath-files
-  "Given a single classpath item (a jar or a directory), return the set of files contained"
-  [path]
-  (cond
-    (-> path fs/path->file (.isDirectory)) (dir-files path)
-    (re-find #".jar$" (str path)) (jar-files path)))
+(def classpath-files
+  "Given a single classpath item (a jar or a directory), return the files it
+  contains. Memoized (and eagerly realized) for the lifetime of the gen-build
+  process: `is-aoted?` is called once per namespace, and without the cache each
+  call would re-walk the entry's whole directory tree (git/source deps) or
+  re-open its jar (maven deps) — O(namespaces × tree-size) wasted I/O."
+  (memoize
+   (fn [path]
+     (cond
+       (-> path fs/path->file (.isDirectory)) (vec (dir-files path))
+       (re-find #"\.jar$" (str path)) (vec (jar-files path))))))
 
 (defn is-aoted?
   [path ns]
