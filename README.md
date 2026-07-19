@@ -145,6 +145,8 @@ Requirements:
 
 Directory-based `:local/root` deps remain **unsupported**. Workspace source roots from deps.edn `:paths` are not treated as git libs and are never packed into `gitjars/`.
 
+Integration coverage: `//test/integration:git_deps_e2e` runs `examples/simple`'s gitdep test (real git fetch of `tools.gitlibs`, pack, AOT, runtime load).
+
 ## BUILD generation (optional)
 
 In a BUILD file,

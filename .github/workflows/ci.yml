@@ -21,3 +21,7 @@ jobs:
         run: bazel build //...
       - name: Run bazel test
         run: bazel test //...
+      # Explicit: real tools.deps git clone + materialize + AOT + test (example-simple).
+      # Also reachable via //test/integration:git_deps_e2e under //... when that package loads.
+      - name: Git deps integration
+        run: bazel test //test/integration:git_deps_e2e
