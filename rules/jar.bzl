@@ -1,3 +1,9 @@
+# Clojure source file extensions used both for the jacoco paths-for-coverage file and
+# for InstrumentedFilesInfo. These two must agree, or sources land in the coverage
+# manifest without a matching paths-file entry (or vice versa) and are dropped from
+# coverage.dat. .cljs is intentionally omitted: CLJS is not on this AOT/instrument path.
+CLOJURE_SOURCE_EXTENSIONS = ["clj", "cljc"]
+
 def contains(lst, item):
     for x in lst:
         if x == item:
@@ -106,17 +112,6 @@ def clojure_jar_impl(ctx):
 
     compile_info = java_common.merge(compile_deps)
 
-    java_info = JavaInfo(
-        output_jar = output_jar,
-        compile_jar = output_jar,
-        source_jar = None,
-        deps = compile_deps,
-        runtime_deps = runtime_deps)
-
-    default_info = DefaultInfo(
-        files = depset([output_jar]),
-        runfiles = runfiles)
-
     aot_nses = list(ctx.attr.aot)
 
     input_files = ctx.files.srcs + ctx.files.resources
@@ -129,6 +124,17 @@ def clojure_jar_impl(ctx):
     compile_classpath = compile_info.transitive_runtime_jars.to_list() + ctx.files.compiledeps
     compile_classpath = [f.path for f in compile_classpath]
     compile_classpath = compile_classpath + [p for p in [src_dir] if p]
+
+    # Under coverage, deps' jars may contain jacoco-instrumented classes whose static
+    # initializers call into the jacoco offline runtime, so it must be loadable during AOT.
+    # Use the java toolchain's own jacocorunner (the same jar java_test uses at test time)
+    # so the offline-runtime version always matches.
+    jacoco_runtime_jars = []
+    if ctx.configuration.coverage_enabled:
+        jacocorunner = ctx.toolchains["@bazel_tools//tools/jdk:toolchain_type"].java.jacocorunner
+        if jacocorunner:
+            jacoco_runtime_jars = [jacocorunner.executable]
+            compile_classpath = compile_classpath + [f.path for f in jacoco_runtime_jars]
 
     native_libs = []
     for f in runfiles.files.to_list():
@@ -152,7 +158,7 @@ def clojure_jar_impl(ctx):
         output = args_file,
         content = json.encode(compile_args))
 
-    inputs = ctx.files.srcs + ctx.files.resources + compile_info.transitive_runtime_jars.to_list() + native_libs + [args_file] + worker_classpath_depset.to_list()
+    inputs = ctx.files.srcs + ctx.files.resources + compile_info.transitive_runtime_jars.to_list() + native_libs + [args_file] + worker_classpath_depset.to_list() + jacoco_runtime_jars
 
     worker_classpath_str = ":".join([d.path for d in worker_classpath_depset.to_list()])
 
@@ -170,7 +176,53 @@ def clojure_jar_impl(ctx):
                                 "supports-multiplex-workers": "1",
                                 "requires-worker-protocol": "json"})
 
+    # Offline-instrument the jar for `bazel coverage`, same shape as JavaBuilder for
+    # java_library: instrumented .class, .class.uninstrumented originals, and a
+    # *-paths-for-coverage.txt mapping. JacocoCoverageRunner (swapped in by java_test
+    # under coverage) consumes that from the runtime classpath with no further wiring.
+    # One-shot tool (not a persistent worker): coverage builds are infrequent vs AOT.
+    final_jar = output_jar
+    if ctx.coverage_instrumented() and len(aot_nses) > 0:
+        instr_jar = ctx.actions.declare_file("%s-instr.jar" % ctx.label.name)
+        # Only AOT-compiled sources (srcs) produce instrumented classes; resources are
+        # never AOT'd, so listing them here would add unmatched paths-file lines and put
+        # permanent-0% files in the coverage baseline.
+        coverage_srcs = [f for f in ctx.files.srcs if f.extension in CLOJURE_SOURCE_EXTENSIONS]
+        instr_args = ctx.actions.args()
+        instr_args.set_param_file_format("multiline")
+        instr_args.use_param_file("@%s", use_always = True)
+        instr_args.add(output_jar)
+        instr_args.add(instr_jar)
+        instr_args.add_all(coverage_srcs)
+        ctx.actions.run(
+            executable = ctx.executable._jacoco_instrumenter,
+            arguments = [instr_args],
+            inputs = [output_jar],
+            outputs = [instr_jar],
+            mnemonic = "ClojureJacocoInstrument",
+            progress_message = "Instrumenting %s for coverage" % ctx.label)
+        final_jar = instr_jar
+
+    java_info = JavaInfo(
+        output_jar = final_jar,
+        compile_jar = output_jar,
+        source_jar = None,
+        deps = compile_deps,
+        runtime_deps = runtime_deps)
+
+    default_info = DefaultInfo(
+        files = depset([final_jar]),
+        runfiles = runfiles)
+
+    # Only srcs (AOT-compiled) can ever be instrumented and reported.
+    instrumented_files_info = coverage_common.instrumented_files_info(
+        ctx,
+        source_attributes = ["srcs"],
+        dependency_attributes = ["deps", "runtime_deps", "data", "compiledeps"],
+        extensions = CLOJURE_SOURCE_EXTENSIONS)
+
     return [
         default_info,
-        java_info
+        java_info,
+        instrumented_files_info,
     ]

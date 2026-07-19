@@ -97,6 +97,34 @@ The main entrypoint will be called with one argument: The Clojure namespace to t
 It should write a JUnit XML report to `$XML_OUTPUT_FILE` and exit with 0 for a pass and non-zero for failure.
 See the [default runner](https://github.com/griffinbank/rules_clojure/blob/e3eabc6621ebc3280410da2a20b56929d63e76ae/src/rules_clojure/testrunner.clj) for inspiration.
 
+### Coverage
+
+`bazel coverage` is supported via Bazel's standard JaCoCo pipeline:
+
+```
+bazel coverage --combined_report=lcov --instrumentation_filter=//src //test/...
+```
+
+Per-test LCOV reports land in `bazel-testlogs/<target>/coverage.dat`; the combined report in
+`bazel-out/_coverage/_coverage_report.dat` (render with `genhtml`). Line data references the
+original `.clj` / `.cljc` sources.
+
+Under coverage, each `clojure_library` matching `--instrumentation_filter` has its output jar
+offline-instrumented (same jar shape as `java_library`), and `java_test` collects execution data
+and converts it to LCOV. Non-coverage builds are unchanged.
+
+Notes and limitations:
+
+- Only AOT-compiled namespaces (`srcs`) are reported. Source-only resource namespaces are compiled
+  in memory at runtime and cannot be offline-instrumented.
+- A `defn` line counts as covered once the namespace loads (the `def` runs at load time); body lines
+  are covered only when the function is called.
+- Branch data (`BRDA`) reflects JVM bytecode branches, which do not map 1:1 to Clojure source —
+  line coverage is the trustworthy signal.
+- Same-basename sources (e.g. many `core.clj` files) are fine across packages: Jacoco keys coverage
+  by `package/SourceFile` (e.g. `foo/bar/core.clj`), and the paths file lists workspace paths that
+  end with that package-relative path. This matches normal `resource_strip_prefix` layout.
+
 ## tools.deps dependencies (optional)
 In your WORKSPACE:
 ```

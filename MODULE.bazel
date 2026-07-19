@@ -19,6 +19,9 @@ maven.install(
         "org.clojure:tools.deps:0.28.1578",
         "org.clojure:tools.namespace:1.1.0",
         "org.clojure:test.check:1.1.1",
+        # Unit tests for the coverage instrumenter (fixture class synthesis + junit).
+        "org.ow2.asm:asm:9.7.1",
+        "junit:junit:4.13.2",
     ],
     fail_if_repin_required = True,
     # repin by running `REPIN=1 bazel run @maven_deps//:pin`
