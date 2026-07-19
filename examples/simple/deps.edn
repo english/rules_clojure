@@ -1,3 +1,4 @@
 {:deps
- {org.clojure/clojure {:mvn/version "1.12.1"}}
+ {org.clojure/clojure {:mvn/version "1.12.1"}
+  io.github.clojure/tools.gitlibs {:git/tag "v2.6.206" :git/sha "d34ba6d489455b30828a7286538934891130de6d"}}
  :paths ["src"]}

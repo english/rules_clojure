@@ -13,6 +13,13 @@ clojure_library(name="core",
                 aot=["example.core"],
                 deps=["@deps//:org_clojure_clojure"])
 
+clojure_library(name="gitdep",
+                srcs=["gitdep.clj"],
+                resource_strip_prefix="src",
+                aot=["example.gitdep"],
+                deps=["@deps//:org_clojure_clojure",
+                      "@deps//:ns_io_github_clojure_tools_gitlibs_clojure_tools_gitlibs"])
+
 java_binary(name="uberjar",
             runtime_deps=["core"])
 

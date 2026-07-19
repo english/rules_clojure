@@ -122,6 +122,29 @@ Note that tools.deps is only used for downloading jars, and creating the BUILD.b
 
 Since `clojure_tools_deps` only downloads jars and only includes them in targets that depend on them, there is no harm in including all `:aliases` in your project.
 
+### Git dependencies
+
+[Git deps](https://clojure.org/guides/deps_and_cli#_using_git_libraries) are supported. Declare any library as a git dep in your deps.edn as usual, e.g.:
+
+```clojure
+{:deps {io.github.weavejester/medley {:git/tag "1.8.0" :git/sha "30e3f85"}}}
+```
+
+(The coords above are illustrative — use whatever git library your project needs.)
+
+tools.deps clones git deps into the standard gitlibs cache (`~/.gitlibs`, or `$GITLIBS` if set), the same way maven deps use `~/.m2`. Because git deps resolve to source directories rather than jars, `clojure_tools_deps` packs each git lib into a deterministic jar inside the `@deps` repository (content-addressed by `:git/sha` in the **jar filename**); from there it behaves exactly like a maven dep, including the per-namespace AOT targets.
+
+**Target names** are derived from the lib name only (e.g. `@deps//:io_github_clojure_tools_gitlibs`), so referring targets stay stable when you bump a sha. The generated jar *path* under `gitjars/` includes the sha and therefore changes on bump (expected rebuild of `@deps`).
+
+Requirements:
+
+- `git` must be on `PATH` during dependency resolution (local and CI hosts that run the deps repository rule / gen tools).
+- The sha must be pinned (`:git/sha`, optionally with `:git/tag`) — tools.deps enforces this.
+- Network access to the git host is required on first fetch (clones land in gitlibs, same operational family as maven + `~/.m2`).
+- Private repos use ambient git credentials (ssh agent, credential helpers); use the `env` attribute of `clojure_tools_deps` to pass extra environment variables if needed.
+
+Directory-based `:local/root` deps remain **unsupported**. Workspace source roots from deps.edn `:paths` are not treated as git libs and are never packed into `gitjars/`.
+
 ## BUILD generation (optional)
 
 In a BUILD file,
