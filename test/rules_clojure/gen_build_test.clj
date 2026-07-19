@@ -759,6 +759,21 @@
         (finally
           (fs/rm-rf tmp))))))
 
+(deftest dep-ns->label-finds-namespaces-in-git-checkout-dirs
+  "gen_srcs builds dep-ns->label from the un-materialized basis (gitlibs dirs).
+   Must discover namespaces under directory classpath entries, not only jars."
+  (let [tmp (fs/new-temp-dir "dep-ns-dir-test")
+        src (fs/->path tmp "src")]
+    (try
+      (write-tree! tmp {"src/foo/bar.clj" "(ns foo.bar)"})
+      (let [basis (git-dep-basis 'io.github.foo/bar git-sha [src])
+            labels (gb/->dep-ns->label {:basis basis :deps-bazel {}})]
+        (is (contains? (:clj labels) 'foo.bar))
+        (is (re-find #"ns_io_github_foo_bar_foo_bar"
+                     (get-in labels [:clj 'foo.bar]))))
+      (finally
+        (fs/rm-rf tmp)))))
+
 (deftest path->absolute-handles-dirs
   (let [deps-edn (fs/->path "/workspace/deps.edn")]
     (testing "absolute paths pass through, regardless of extension"
