@@ -19,7 +19,35 @@ jobs:
           key: bazel
       - name: Run bazel build
         run: bazel build //...
-      - name: Run bazel test
-        run: bazel test //...
+      - name: Unit tests (coverage)
+        run: |
+          bazel coverage \
+            --combined_report=lcov \
+            --instrumentation_filter=//src,//test,//tools \
+            //test/...
       - name: Coverage e2e smoke
         run: bash tools/coverage/e2e_smoke.sh
+      - name: Example simple (coverage)
+        run: |
+          cd examples/simple
+          bazel coverage \
+            --combined_report=lcov \
+            --instrumentation_filter=//src \
+            //test/...
+      - name: Example stress (coverage)
+        run: |
+          cd examples/stress
+          bazel coverage \
+            --combined_report=lcov \
+            --instrumentation_filter=//test \
+            //test/...
+      - name: Upload combined LCOV
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-reports
+          path: |
+            bazel-out/_coverage/_coverage_report.dat
+            examples/simple/bazel-out/_coverage/_coverage_report.dat
+            examples/stress/bazel-out/_coverage/_coverage_report.dat
+          if-no-files-found: warn

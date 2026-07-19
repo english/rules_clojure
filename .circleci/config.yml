@@ -1,5 +1,7 @@
 version: 2.1
 
+# Coverage is the primary test path: this suite is small/fast, so the extra
+# instrumentation cost is acceptable and we always exercise the JaCoCo path.
 jobs:
   test:
     docker:
@@ -17,15 +19,40 @@ jobs:
       - run:
           command: bazel --version
       - run:
-          name: unit tests
-          command: bazel test //...
+          name: unit tests (coverage)
+          command: |
+            bazel coverage \
+              --combined_report=lcov \
+              --instrumentation_filter=//src,//test,//tools \
+              //test/...
       - run:
-          name: example tests
-          command: cd examples/simple && bazel test //...
+          name: coverage e2e smoke (same-basename LCOV)
+          command: bash tools/coverage/e2e_smoke.sh
       - run:
-          name: stress tests
-          command: cd examples/stress && bazel test //...
-
+          name: example tests (coverage)
+          command: |
+            cd examples/simple
+            bazel coverage \
+              --combined_report=lcov \
+              --instrumentation_filter=//src \
+              //test/...
+      - run:
+          name: stress tests (coverage)
+          command: |
+            cd examples/stress
+            bazel coverage \
+              --combined_report=lcov \
+              --instrumentation_filter=//test \
+              //test/...
+      - store_artifacts:
+          path: bazel-out/_coverage/_coverage_report.dat
+          destination: coverage/main_coverage_report.dat
+      - store_artifacts:
+          path: examples/simple/bazel-out/_coverage/_coverage_report.dat
+          destination: coverage/simple_coverage_report.dat
+      - store_artifacts:
+          path: examples/stress/bazel-out/_coverage/_coverage_report.dat
+          destination: coverage/stress_coverage_report.dat
 
 workflows:
   test-workflow:
