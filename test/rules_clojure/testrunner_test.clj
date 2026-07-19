@@ -1,5 +1,5 @@
 (ns rules-clojure.testrunner-test
-  (:require [clojure.test :as t :refer [deftest is]]
+  (:require [clojure.test :as t :refer [deftest is testing]]
             [clojure.xml :as xml]
             [rules-clojure.testrunner :as tr])
   (:import [java.io ByteArrayInputStream Closeable File PrintWriter StringWriter]))
@@ -98,16 +98,20 @@
 (defn run-fixture
   "Run the-ns through the real runner, writing XML to a temp file, and return
    {:summary <clojure.test summary> :doc <parsed XML root>}. Silences the
-   runner's console + test output."
-  [the-ns]
-  (let [out (File/createTempFile "junit" ".xml")]
-    ;; The JDK ships no Closeable that deletes a file, so reify one and let
-    ;; with-open delete the temp file on scope exit.
-    (with-open [_ (reify Closeable (close [_] (.delete out)))]
-      (let [sink (PrintWriter. (StringWriter.))
-            summary (binding [*out* sink, t/*test-out* sink]
-                      (tr/run-ns the-ns (.getAbsolutePath out)))]
-        {:summary summary :doc (parse (slurp out))}))))
+   runner's console + test output.
+
+   Optional `test-filter` is the raw `--test_filter` / TESTBRIDGE_TEST_ONLY
+   string (same as -main passes through after reading the env)."
+  ([the-ns] (run-fixture the-ns nil))
+  ([the-ns test-filter]
+   (let [out (File/createTempFile "junit" ".xml")]
+     ;; The JDK ships no Closeable that deletes a file, so reify one and let
+     ;; with-open delete the temp file on scope exit.
+     (with-open [_ (reify Closeable (close [_] (.delete out)))]
+       (let [sink (PrintWriter. (StringWriter.))
+             summary (binding [*out* sink, t/*test-out* sink]
+                       (tr/run-ns the-ns (.getAbsolutePath out) test-filter))]
+         {:summary summary :doc (parse (slurp out))})))))
 
 (deftest passing-namespace-runs-clean
   (let [{:keys [summary doc]} (run-fixture 'rules-clojure.testrunner-fixtures.passing)
@@ -149,3 +153,108 @@
     (is (= 1 (:error summary)) "a namespace that won't load is one error")
     (is (contains? cases "load"))
     (is (= [:error] (map :tag (elements (cases "load")))))))
+
+;; ----------------------------------------------------------------------------
+;; --test_filter / TESTBRIDGE_TEST_ONLY
+;; ----------------------------------------------------------------------------
+
+(def filter-ns 'rules-clojure.testrunner-fixtures.filter)
+
+(defn- filter-var
+  "Resolve a var from the filter fixture after requiring it (avoid compile-time
+   #'ns/name which fails when the fixture ns is only on the resource classpath)."
+  [sym]
+  (require filter-ns)
+  (ns-resolve filter-ns sym))
+
+(deftest var->test-name-is-fully-qualified
+  (is (= "rules-clojure.testrunner-fixtures.filter/alpha-pass"
+         (tr/var->test-name (filter-var 'alpha-pass)))))
+
+(deftest test-filter->pred-blank-matches-everything
+  (doseq [f [nil "" "   "]]
+    (let [pred (tr/test-filter->pred f)]
+      (is (true? (boolean (pred (filter-var 'alpha-pass)))))
+      (is (true? (boolean (pred (filter-var 'gamma-fail))))))))
+
+(deftest test-filter->pred-substring-and-regex
+  (let [alpha (filter-var 'alpha-pass)
+        gamma (filter-var 'gamma-fail)
+        beta (filter-var 'beta-pass)]
+    (is (true? ((tr/test-filter->pred "alpha-pass") alpha)))
+    (is (false? ((tr/test-filter->pred "alpha-pass") gamma)))
+    (is (true? ((tr/test-filter->pred "testrunner-fixtures.filter/alpha") alpha)))
+    (is (true? ((tr/test-filter->pred "alpha|gamma") alpha)))
+    (is (true? ((tr/test-filter->pred "alpha|gamma") gamma)))
+    (is (false? ((tr/test-filter->pred "alpha|gamma") beta)))))
+
+(deftest test-filter->pred-invalid-regex-throws-clear-error
+  (is (thrown-with-msg? clojure.lang.ExceptionInfo
+                        #"Invalid --test_filter regex"
+                        (tr/test-filter->pred "*"))))
+
+(deftest run-ns-no-filter-runs-all-filter-fixture
+  (let [{:keys [summary]} (run-fixture filter-ns)]
+    (is (= 3 (:test summary)))
+    (is (= 2 (:pass summary)))
+    (is (= 1 (:fail summary)))
+    (is (= 1 (tr/exit-code nil summary)) "failures still fail the process")))
+
+(deftest run-ns-substring-filter-selects-tests
+  (testing "single passing test"
+    (let [{:keys [summary doc]} (run-fixture filter-ns "alpha-pass")
+          cases (by-name (mapcat elements (elements doc)))]
+      (is (= 1 (:test summary)))
+      (is (= 1 (:pass summary)))
+      (is (= 0 (:fail summary)))
+      (is (= 0 (tr/exit-code "alpha-pass" summary)))
+      (is (= #{"alpha-pass"} (set (keys cases))) "JUnit XML lists only selected vars")))
+  (testing "shared substring selects both passers"
+    (let [{:keys [summary doc]} (run-fixture filter-ns "pass")
+          cases (by-name (mapcat elements (elements doc)))]
+      (is (= 2 (:test summary)))
+      (is (= 2 (:pass summary)))
+      (is (= 0 (:fail summary)))
+      (is (= #{"alpha-pass" "beta-pass"} (set (keys cases))))))
+  (testing "selecting only the failing test"
+    (let [{:keys [summary]} (run-fixture filter-ns "gamma")]
+      (is (= 1 (:test summary)))
+      (is (= 1 (:fail summary)))
+      (is (= 1 (tr/exit-code "gamma" summary))))))
+
+(deftest run-ns-regex-filter
+  (let [{:keys [summary]} (run-fixture filter-ns "alpha|beta")]
+    (is (= 2 (:test summary)))
+    (is (= 2 (:pass summary)))
+    (is (= 0 (:fail summary)))))
+
+(deftest run-ns-filter-no-match-is-process-failure
+  "A typo in --test_filter must not look like a green empty suite."
+  (let [{:keys [summary doc]} (run-fixture filter-ns "does-not-exist")
+        cases (mapcat elements (elements doc))]
+    (is (= 0 (:test summary)))
+    (is (= 0 (:fail summary)))
+    (is (= 0 (:error summary)))
+    (is (tr/filter-miss? "does-not-exist" summary))
+    (is (= 1 (tr/exit-code "does-not-exist" summary)))
+    (is (empty? cases) "no testcases in XML when nothing matched")))
+
+(deftest run-ns-invalid-filter-regex-is-error
+  (let [{:keys [summary doc]} (run-fixture filter-ns "*")
+        cases (by-name (mapcat elements (elements doc)))]
+    (is (= 1 (:error summary)))
+    (is (= 1 (tr/exit-code "*" summary)))
+    (is (contains? cases "test-filter"))))
+
+(deftest run-ns-filter-matches-mixed-fixture-xml
+  "End-to-end through run-ns (the same entry -main uses after reading
+   TESTBRIDGE_TEST_ONLY): filter + JUnit XML on the mixed fixture."
+  (let [{:keys [summary doc]} (run-fixture 'rules-clojure.testrunner-fixtures.mixed "a-pass")
+        suite (first (elements doc))
+        cases (by-name (elements suite))]
+    (is (= 1 (:test summary)))
+    (is (zero? (:fail summary)))
+    (is (zero? (:error summary)))
+    (is (= "1" (get-in suite [:attrs :tests])))
+    (is (= #{"a-pass"} (set (keys cases))))
+    (is (empty? (elements (cases "a-pass"))))))

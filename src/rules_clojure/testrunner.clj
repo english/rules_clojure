@@ -213,39 +213,155 @@
                      {:message message
                       :body (with-out-str (stack/print-cause-trace t))}))))
 
-(defn run-ns
-  "Run all tests in the-ns, write a JUnit XML report to `out-path` when it is
-   non-nil, and return the clojure.test summary. Performs no System/exit and
-   reads no environment, so it can be driven directly from tests."
-  [the-ns out-path]
-  (binding [*results* (atom {:cases []})]
-    (let [summary
+;; ----------------------------------------------------------------------------
+;; --test_filter (TESTBRIDGE_TEST_ONLY)
+;; ----------------------------------------------------------------------------
+
+(defn var->test-name
+  "Fully-qualified name of a test var, e.g. \"foo.bar-test/my-test\"."
+  [v]
+  (let [m (meta v)]
+    (str (ns-name (:ns m)) "/" (:name m))))
+
+(defn test-filter->pred
+  "Build a predicate on test vars from bazel's `--test_filter` value
+  (`TESTBRIDGE_TEST_ONLY`).
+
+  Blank/nil matches every test. Otherwise the filter is a regular expression
+  matched with `re-find` against each var's fully-qualified name
+  (`ns/test-name`), so a plain string acts as a substring match.
+
+  Throws `ex-info` with a clear message if the pattern is not a valid regex."
+  [test-filter]
+  (if (str/blank? test-filter)
+    (constantly true)
+    (let [pattern
           (try
-            (require the-ns)
-            (try
-              ;; run-tests reports per-test results into
-              ;; *results* as it goes. clojure.test lets fixture exceptions
-              ;; (:once / :each) propagate out of run-tests rather than
-              ;; catching them, so a throw here is a fixture/runtime error
-              ;; that may follow already-recorded results — attribute it as a
-              ;; distinct errored case rather than a "load" failure.
-              (binding [c.test/report pretty-report]
-                (c.test/run-tests the-ns))
-              (catch Throwable t
-                (record-error! "fixture-error" (str the-ns)
-                               (str "Error running tests in " the-ns) t)
-                (println t)
-                {:fail 0 :error 1}))
-            (catch Throwable t
-              (record-error! "load" (str the-ns)
-                             (str "Failed to load " the-ns) t)
-              (println t)
-              {:fail 0 :error 1}))]
-      (write-xml! out-path @*results*)
+            (re-pattern test-filter)
+            (catch java.util.regex.PatternSyntaxException e
+              (throw (ex-info
+                      (str "Invalid --test_filter regex: "
+                           (pr-str test-filter)
+                           " (" (.getMessage e) ")")
+                      {:test-filter test-filter}
+                      e))))]
+      (fn [v]
+        (boolean (re-find pattern (var->test-name v)))))))
+
+(defn- test-vars-for-ns
+  "Test vars in `ns-obj` matching `pred`, in a stable order by var name."
+  [ns-obj pred]
+  (->> (ns-interns ns-obj)
+       vals
+       (filter (comp :test meta))
+       (filter pred)
+       (sort-by (comp str :name meta))
+       vec))
+
+(defn- run-ns-tests*
+  "Run selected test vars in an already-loaded namespace. Mirrors a single-ns
+  `clojure.test/run-tests` (begin/end-ns + summary) but only runs `vars`.
+  Suite `:once` fixtures still run via `test-vars` even when filtering."
+  [ns-obj vars]
+  (binding [c.test/*report-counters* (ref c.test/*initial-report-counters*)]
+    (c.test/do-report {:type :begin-test-ns :ns ns-obj})
+    (c.test/test-vars vars)
+    (c.test/do-report {:type :end-test-ns :ns ns-obj})
+    (let [summary (assoc @c.test/*report-counters* :type :summary)]
+      (c.test/do-report summary)
       summary)))
+
+(defn filter-miss?
+  "True when a non-blank `--test_filter` selected zero tests and nothing failed
+  or errored (including load/fixture errors)."
+  [test-filter summary]
+  (and (not (str/blank? test-filter))
+       (zero? (or (:test summary) 0))
+       (zero? (or (:fail summary) 0))
+       (zero? (or (:error summary) 0))))
+
+(defn exit-code
+  "Process exit code for a completed run. Non-zero on assertion failures,
+  errors, or a non-blank filter that matched no tests (typo guard)."
+  [test-filter summary]
+  (if (or (filter-miss? test-filter summary)
+          (pos? (or (:fail summary) 0))
+          (pos? (or (:error summary) 0)))
+    1
+    0))
+
+(defn run-ns
+  "Run tests in `ns-sym`, write a JUnit XML report to `out-path` when it is
+   non-nil, and return the clojure.test summary.
+
+   `test-filter` is the raw `--test_filter` / `TESTBRIDGE_TEST_ONLY` string
+   (nil/blank = run all tests). Performs no System/exit and does not read the
+   environment, so tests can drive it directly.
+
+   Only selected vars are reported in JUnit XML. A non-blank filter that
+   matches nothing prints a warning; callers should treat that as failure via
+   `exit-code`."
+  ([ns-sym out-path]
+   (run-ns ns-sym out-path nil))
+  ([ns-sym out-path test-filter]
+   (binding [*results* (atom {:cases []})]
+     (let [summary
+           (try
+             (require ns-sym)
+             (try
+               ;; Per-test results go into *results* via pretty-report.
+               ;; clojure.test lets fixture exceptions (:once / :each) propagate
+               ;; out of test-vars rather than catching them, so a throw here is
+               ;; a fixture/runtime error that may follow already-recorded
+               ;; results — attribute it as a distinct errored case rather than
+               ;; a "load" failure.
+               (binding [c.test/report pretty-report]
+                 (let [ns-obj (find-ns ns-sym)
+                       pred (test-filter->pred test-filter)
+                       vars (test-vars-for-ns ns-obj pred)]
+                   (when (and (not (str/blank? test-filter)) (empty? vars))
+                     (println
+                      (str "WARNING: --test_filter matched 0 tests in " ns-sym
+                           " (filter=" (pr-str test-filter) "). "
+                           "Patterns match each test's fully-qualified name "
+                           "(ns/test-name), not JUnit Class#method syntax.")))
+                   (run-ns-tests* ns-obj vars)))
+               (catch clojure.lang.ExceptionInfo e
+                 (if (:test-filter (ex-data e))
+                   ;; Invalid filter regex from test-filter->pred
+                   (do
+                     (println (.getMessage e))
+                     (record-error! "test-filter" (str ns-sym)
+                                    (.getMessage e) e)
+                     {:fail 0 :error 1 :test 0})
+                   ;; Fixture/code may throw ExceptionInfo too
+                   (do
+                     (record-error! "fixture-error" (str ns-sym)
+                                    (str "Error running tests in " ns-sym) e)
+                     (println e)
+                     {:fail 0 :error 1})))
+               (catch Throwable t
+                 (record-error! "fixture-error" (str ns-sym)
+                                (str "Error running tests in " ns-sym) t)
+                 (println t)
+                 {:fail 0 :error 1}))
+             (catch Throwable t
+               (record-error! "load" (str ns-sym)
+                              (str "Failed to load " ns-sym) t)
+               (println t)
+               {:fail 0 :error 1}))]
+       (write-xml! out-path @*results*)
+       summary))))
 
 (defn -main [& args]
   (assert (string? (first args)) (print-str "first argument must be a string, got" args))
-  (let [summary (run-ns (symbol (first args)) (System/getenv "XML_OUTPUT_FILE"))]
+  ;; Bazel passes --test_filter to the test action as TESTBRIDGE_TEST_ONLY.
+  (let [test-filter (System/getenv "TESTBRIDGE_TEST_ONLY")
+        summary (run-ns (symbol (first args))
+                        (System/getenv "XML_OUTPUT_FILE")
+                        test-filter)
+        code (exit-code test-filter summary)]
     (println summary)
-    (System/exit (if (and (zero? (:fail summary)) (zero? (:error summary))) 0 1))))
+    (when (filter-miss? test-filter summary)
+      (println "ERROR: exiting non-zero because --test_filter matched 0 tests."))
+    (System/exit code)))

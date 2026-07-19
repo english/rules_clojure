@@ -92,6 +92,27 @@ Delegates to `java_test`, using `rules-clojure.testrunner` as the main class. `c
 
 When bazel sets `XML_OUTPUT_FILE` (it does for every test action), the runner also writes a JUnit XML report there, with one `<testcase>` per `deftest` (including per-test timing) and `<failure>`/`<error>` detail. This means callers (e.g. CI) get structured, per-test results to display, rather than just relying on bazel's bare pass/fail exit code.
 
+#### Test filtering
+
+The default testrunner honours bazel's [`--test_filter`](https://bazel.build/reference/command-line-reference#flag--test_filter) flag (forwarded as the `TESTBRIDGE_TEST_ONLY` environment variable). The filter is a regular expression matched with `re-find` against each test's fully-qualified name, `ns/test-name` — a plain string therefore acts as a substring match. Only matching `deftest`s in the target namespace are run; JUnit XML lists only those cases.
+
+This is **not** JUnit's `Class#method` filter grammar — it is Clojure `ns/var` names.
+
+```
+# run only foo.bar-test/my-test (gen_srcs names the target $ns.test)
+bazel test //path/to:bar_test.test --test_filter=my-test
+
+# every test whose name starts with "integration-"
+bazel test //path/to:bar_test.test --test_filter='/integration-'
+```
+
+Notes:
+
+- A non-blank filter that matches **no** tests fails the action (exit non-zero) so a typo does not look like a green empty suite.
+- Namespace `:once` / `:each` fixtures still run via `clojure.test` when a subset of vars is selected.
+- `--test_filter` is part of the test action's cache key (via `TESTBRIDGE_TEST_ONLY`), so filtered results are not reused as full-target passes.
+- Filtering is implemented by the **default** `main_class` only. A custom `main_class` must honour `TESTBRIDGE_TEST_ONLY` itself if it wants the same behaviour.
+
 A `main_class` can be supplied, which must refer to a _class_ (see [`gen-class`](https://clojuredocs.org/clojure.core/gen-class)).
 The main entrypoint will be called with one argument: The Clojure namespace to test.
 It should write a JUnit XML report to `$XML_OUTPUT_FILE` and exit with 0 for a pass and non-zero for failure.
