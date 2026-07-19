@@ -31,7 +31,9 @@ clojure_library(name="test-deps",
                 resource_strip_prefix="test/",
                 deps=["//src/rules_clojure:libworker",
                       "//src/rules_clojure:libcompile",
+                      "//src/rules_clojure:libgen_build",
                       "//src/rules_clojure:srcjar",
+                      "//src/rules_clojure:bootstrap",
                       ":test-utils",
                       "@example-simple//src/example:src"])
 
@@ -83,3 +85,9 @@ clojure_test(name="compile-test",
 clojure_test(name="testrunner-test",
              deps=[":test-deps"],
              test_ns = "rules-clojure.testrunner-test")
+
+clojure_test(
+    name = "pin-deps-test",
+    deps = [":test-deps"],
+    test_ns = "rules-clojure.pin-deps-test",
+)

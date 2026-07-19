@@ -1,19 +1,36 @@
 module(name = "example-simple")
 
 bazel_dep(name = "rules_clojure", version = "0.5")
+bazel_dep(name = "rules_jvm_external", version = "6.8")
 
-local_path_override(module_name = "rules_clojure",
-                    path = "../..")
-
-deps = use_extension("@rules_clojure//:extensions.bzl", "deps")
-
-deps.install(
-    repo_name = "deps",
-    aliases = [
-        "dev",
-        "test",
-    ],
-    deps_edn = "//:deps.edn",
+local_path_override(
+    module_name = "rules_clojure",
+    path = "../..",
 )
 
-use_repo(deps, "deps")
+# Maven jars downloaded by rules_jvm_external (Bazel), not tools.deps / ~/.m2.
+# After changing deps.edn, re-pin:
+#   bazel run @rules_clojure//src/rules_clojure:pin_deps -- \
+#     :deps-edn-path $PWD/deps.edn \
+#     :lock-path $PWD/deps_install_lock.json \
+#     :artifacts-bzl-path $PWD/deps_artifacts.bzl \
+#     :repository-dir $HOME/.m2/repository \
+#     :aliases "[]"
+# then update DEPS_ARTIFACTS below (or the pin output in deps_artifacts.bzl) and
+# refresh the lock file for rje if required.
+maven = use_extension("@rules_jvm_external//:extensions.bzl", "maven")
+maven.install(
+    name = "deps",
+    # Direct + transitive GAVs from pin (see deps_artifacts.bzl).
+    artifacts = [
+        "org.clojure:clojure:1.12.1",
+        "org.clojure:core.specs.alpha:0.4.74",
+        "org.clojure:spec.alpha:0.5.238",
+    ],
+    repositories = [
+        "https://repo1.maven.org/maven2",
+    ],
+    lock_file = "//:deps_install_lock.json",
+    fail_if_repin_required = False,
+)
+use_repo(maven, "deps")

@@ -18,6 +18,7 @@ java_library(
                "jar.clj",
                "worker.clj",
                "gen_build.clj",
+               "pin_deps.clj",
                "namespace/parse.cljc",
                "namespace/file.clj",
                "namespace/find.clj",
@@ -131,6 +132,18 @@ java_binary(name="gen_build",
             main_class="rules_clojure.gen_build",
             runtime_deps=[":libgen_build"],
             jvm_flags = ["-Xmx500m", "-XX:MaxMetaspaceSize=500m"])
+
+# Pin deps.edn → rules_jvm_external lock (tools.deps resolve only; rje downloads later).
+java_binary(
+    name = "pin_deps",
+    main_class = "clojure.main",
+    runtime_deps = [":bootstrap"],
+    jvm_flags = [
+        "-Dclojure.main.report=stderr",
+        "-Xmx1g",
+    ],
+    args = ["-m", "rules-clojure.pin-deps"],
+)
 
 java_library(name="srcjar",
              resources=glob(["*.clj"]),
